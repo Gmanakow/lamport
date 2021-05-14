@@ -1,0 +1,13 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="Lampart:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/Lampart_jar</output-path>
+    <root id="archive" name="Lampart.jar">
+      <element id="directory" name="META-INF">
+        <element id="file-copy" path="$PROJECT_DIR$/src/main/java/META-INF/MANIFEST.MF" />
+      </element>
+      <element id="module-output" name="Lampart" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/../../../utils/mpj/mpj-v0_44/lib/mpj.jar" path-in-jar="/" />
+      <element id="extracted-dir" path="$PROJECT_DIR$/../../../utils/mpj/mpj-v0_44/lib/mpi.jar" path-in-jar="/" />
+    </root>
+  </artifact>
+</component>
