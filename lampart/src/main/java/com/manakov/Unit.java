@@ -1,88 +1,149 @@
 package com.manakov;
-import mpi.MPI;
 
+import mpi.MPI;
+import mpi.Status;
+
+import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Stack;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.HashMap;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class Unit {
-    public int rank;
-    public int size;
 
-    public Stack<Task> tasks = null;
-    public ArrayList<LampartTime> queue = null;
+    int state;
+    int time;
+    int lockTime;
 
-    AtomicIntegerArray ticket;
-    AtomicIntegerArray entering;
+    ArrayList<Doub> queue = new ArrayList<>();
 
+    class Doub{
+        public Doub(int rank, int time){
+            this.rank = rank;
+            this.time = 0;
+        }
+        public int rank;
+        public int time;
+    }
+
+    int rank;
+    int size;
+
+    Thread thread;
 
     public Unit(int rank){
-        this.rank = rank;
+        this.state = 0;
+        this.time = rank;
+
         this.size = MPI.COMM_WORLD.Size();
+        this.rank = rank;
 
-        this.tasks = new Stack<>();
-        this.queue = new ArrayList<>();
-
-        this.ticket = new AtomicIntegerArray(size);
-        this.entering = new AtomicIntegerArray(size);
+        Runnable runnable = this::main;
+        this.thread = new Thread(runnable);
+        this.thread.start();
     }
 
-    public void exec(){
-            lock(rank);
-
-            for (int i = 0; i< 10; i++){
-                System.out.println("hey " + i + " from rank " + rank);
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException e){
-                    e.printStackTrace();
-                }
-            };
-
-            unlock(rank);
-
+    public void lock(){
+        this.state = 1;
+        sendNotifications();
+        this.lockTime = time;
+        increment("lock");
+        getNotifications();
+        this.state = 2;
     }
 
-    public void lock(int rank){
-        System.out.println("locked " + rank);
-        entering.set(rank, 1);
-
-        int max = 0;
-        for (int i = 0; i<size; i++){
-            int current = ticket.get(i);
-            if (current > max){
-                max = current;
-            }
+    public void unlock(){
+        this.state = 0;
+        int[] buffer = new int[1];
+        buffer[0] = time;
+        for (Doub item : queue) {
+            MPI.COMM_WORLD.Ssend(buffer, 0, 1, MPI.INT, item.rank, 0);
+            System.out.println(rank + " allows " + item.rank + " on release " + time + " " + item.time );
         }
+        queue.clear();
+    }
 
-        ticket.set(rank, 1+max);
-        entering.set(rank, 0);
+    public void merge(){
+        try {
+            this.thread.stop();
+        } catch (Exception e){
+            e.printStackTrace();
+        }
+    }
 
-        for (int i = 0; i< size; ++i){
-            if (i != rank){
-                while (entering.get(i) == 1) {
-                    System.out.println(rank + "yeild");
-                    Thread.yield();
-                }
-                System.out.println(i + " "+ ticket.get(i) + " " +ticket.get(rank) );
-                while ((ticket.get(i) != 0) && ((ticket.get(rank) > ticket.get(i)) || ((ticket.get(rank) == ticket.get(i)) && (rank > i))) ){
-                    System.out.println(rank + "yeild");
-                    Thread.yield();
-                }
-            }
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e){
-                e.printStackTrace();
+    public void sendNotifications(){ //sending awaited messages to all threads, notifying them of intentions to take control.
+        int[] buffer = new int[1];
+        for (int i=0; i< size; i++){
+            if (i!=rank){
+                buffer[0] = this.time;
+                MPI.COMM_WORLD.Ssend(buffer, 0, 1, MPI.INT, i, 1);
             }
         }
     }
 
-    public void unlock(int rank){
-        System.out.println("unlocked " + rank);
-        ticket.set(rank, 0);
+    public void getNotifications(){ // awaiting messages from threads with permission.
+        int[] buffer = new int[1];
+        for (int i=0; i < size-1; i++){
+            Status status = MPI.COMM_WORLD.Recv(buffer, 0, 1, MPI.INT, MPI.ANY_SOURCE, 0);
+            increment("income");
+        }
     }
 
+    public void increment(String context){
+        synchronized ((Object) time){
+            this.time++;
+            System.out.println(context + " " +rank);
+        }
+    }
 
+    public void additem(int rank, int time){
+        synchronized ((Object) queue){
+            this.queue.add(new Doub(rank, time));
+        }
+    }
+
+    public void main(){
+        while(true){
+            int[] buffer = new int[1];
+            Status status = MPI.COMM_WORLD.Recv(buffer, 0 , 1, MPI.INT, MPI.ANY_SOURCE, 1);
+            int incomeTime = buffer[0];
+            if (incomeTime > this.time) this.time = incomeTime + 1;
+            if (status.source != rank){
+                switch (this.state){
+                    case 0:
+                        buffer[0] = this.time;
+                        MPI.COMM_WORLD.Ssend(buffer, 0, 1, MPI.INT, status.source, 0);
+                        System.out.println(rank + " allows " + status.source + " cos free");
+                        increment("allow by free");
+                        break;
+                    case 1:
+                        if (this.lockTime < incomeTime) {                                                         // if i locked earlier, he waits
+                            additem(status.source, incomeTime);
+                            System.out.println(rank + " blocks " + status.source + " on time " + this.lockTime + " " + incomeTime );
+                        } else if ( this.lockTime == incomeTime ) {
+                            if (rank < status.source){                                                            // if we locked at the same time, but i am lower rank, he waits
+                                additem(status.source, incomeTime);
+                                System.out.println(rank + " blocks " + status.source + " on rank " + this.lockTime + " " + incomeTime );
+                            } else {                                                                              // or i will wait.
+                                buffer[0] = this.time;
+                                MPI.COMM_WORLD.Ssend(buffer, 0, 1, MPI.INT, status.source, 0);
+                                System.out.println(rank + " allows " + status.source + " on rank " + this.lockTime + " " + incomeTime );
+                                increment("allow by rank");
+                            }
+                        } else {                                                                                  // or i will wait
+                            buffer[0] = this.time;
+                            MPI.COMM_WORLD.Ssend(buffer, 0, 1, MPI.INT, status.source, 0);
+                            System.out.println(rank + " allows " + status.source + " on time " + this.lockTime + " " + incomeTime );
+                            increment("allow by time");
+                        }
+                        break;
+                    case 2: // if i am working, he waits.
+                        additem(status.source, incomeTime);
+                        System.out.println(rank + " blocks " + status.source + " on work " + this.lockTime + " " + incomeTime );
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
 }
